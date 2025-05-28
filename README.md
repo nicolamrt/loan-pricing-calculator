@@ -1,6 +1,6 @@
 # Loan Pricing Calculator
 
-Sistema di pricing per prestiti bancari basato su metodologia MetricsLab.
+Sistema di pricing per prestiti bancari.
 
 ## Funzionalità
 - Calcolo tasso di pareggio
