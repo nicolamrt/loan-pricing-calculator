@@ -25,17 +25,22 @@ class LoanPricingCalculator:
     def __init__(self):
         self.risk_free_rate = 0.03  # Tasso risk-free base
         
-    def calculate_break_even_rate(self, loan_amount, duration_years, rating_class, 
-                                 operational_costs, funding_spread, equity_cost, 
-                                 capital_ratio, expected_loss_rate):
+    def calculate_break_even_rate(self, loan_amount, duration_years, pd_1year, 
+                                 operational_costs_pct, funding_spread, equity_cost, 
+                                 capital_ratio, lgd_rate):
         """
         Calcola il tasso di pareggio secondo la metodologia MetricsLab
         """
+        # Calcolo perdita attesa
+        cumulative_pd = 1 - (1 - pd_1year) ** duration_years
+        expected_loss = loan_amount * cumulative_pd * lgd_rate
+        expected_loss_rate = expected_loss / loan_amount
+        
         # Spread finanziario (copertura costo fondi)
         financial_spread = (capital_ratio * equity_cost) + ((1 - capital_ratio) * funding_spread)
         
-        # Spread operativo (copertura costi operativi)
-        operational_spread = operational_costs / loan_amount
+        # Spread operativo (copertura costi operativi come % del capitale)
+        operational_spread = operational_costs_pct
         
         # Spread di credito (copertura perdite attese)
         credit_spread = expected_loss_rate
@@ -51,35 +56,54 @@ class LoanPricingCalculator:
             'financial_spread': financial_spread,
             'operational_spread': operational_spread,
             'credit_spread': credit_spread,
-            'break_even_rate': break_even_rate
+            'break_even_rate': break_even_rate,
+            'expected_loss': expected_loss,
+            'cumulative_pd': cumulative_pd
         }
     
     def generate_amortization_schedule(self, loan_amount, annual_rate, duration_years, 
-                                     payment_frequency=12, loan_type="fixed_amortizing"):
+                                     payment_frequency, loan_type="fixed_amortizing", 
+                                     variable_spread=0):
         """
-        Genera piano di ammortamento
+        Genera piano di ammortamento con più opzioni
         """
-        total_payments = duration_years * payment_frequency
-        monthly_rate = annual_rate / payment_frequency
+        # Calcolo numero rate e frequenza
+        if payment_frequency == "Mensile":
+            freq_per_year = 12
+            days_between = 30
+        elif payment_frequency == "Trimestrale":
+            freq_per_year = 4
+            days_between = 90
+        elif payment_frequency == "Semestrale":
+            freq_per_year = 2
+            days_between = 180
+        elif payment_frequency == "Annuale":
+            freq_per_year = 1
+            days_between = 365
+        else:
+            freq_per_year = 12  # Default mensile
+            days_between = 30
         
-        if loan_type == "fixed_amortizing":
-            # Rate costanti (capitale + interessi)
-            if monthly_rate > 0:
-                monthly_payment = loan_amount * (monthly_rate * (1 + monthly_rate)**total_payments) / \
-                                 ((1 + monthly_rate)**total_payments - 1)
-            else:
-                monthly_payment = loan_amount / total_payments
-                
-            schedule = []
-            remaining_balance = loan_amount
+        total_payments = int(duration_years * freq_per_year)
+        periodic_rate = annual_rate / freq_per_year
+        
+        schedule = []
+        remaining_balance = loan_amount
+        
+        for payment_num in range(1, total_payments + 1):
+            payment_date = datetime.now() + timedelta(days=payment_num * days_between)
             
-            for payment_num in range(1, total_payments + 1):
-                interest_payment = remaining_balance * monthly_rate
+            if loan_type == "fixed_amortizing":
+                # Rate costanti (capitale + interessi)
+                if periodic_rate > 0:
+                    monthly_payment = loan_amount * (periodic_rate * (1 + periodic_rate)**total_payments) / \
+                                     ((1 + periodic_rate)**total_payments - 1)
+                else:
+                    monthly_payment = loan_amount / total_payments
+                    
+                interest_payment = remaining_balance * periodic_rate
                 principal_payment = monthly_payment - interest_payment
                 remaining_balance -= principal_payment
-                
-                # Data di pagamento
-                payment_date = datetime.now() + timedelta(days=payment_num * 30)
                 
                 schedule.append({
                     'Payment_Number': payment_num,
@@ -90,22 +114,42 @@ class LoanPricingCalculator:
                     'Remaining_Balance': max(0, remaining_balance)
                 })
                 
-        elif loan_type == "fixed_bullet":
-            # Solo interessi, capitale alla fine
-            monthly_interest = loan_amount * monthly_rate
-            schedule = []
-            
-            for payment_num in range(1, total_payments + 1):
-                payment_date = datetime.now() + timedelta(days=payment_num * 30)
+            elif loan_type == "variable_amortizing":
+                # Tasso variabile - per semplicità assumiamo spread costante
+                current_rate = self.risk_free_rate + variable_spread
+                periodic_variable_rate = current_rate / freq_per_year
+                
+                if periodic_variable_rate > 0:
+                    monthly_payment = remaining_balance * (periodic_variable_rate * (1 + periodic_variable_rate)**(total_payments - payment_num + 1)) / \
+                                     ((1 + periodic_variable_rate)**(total_payments - payment_num + 1) - 1)
+                else:
+                    monthly_payment = remaining_balance / (total_payments - payment_num + 1)
+                
+                interest_payment = remaining_balance * periodic_variable_rate
+                principal_payment = monthly_payment - interest_payment
+                remaining_balance -= principal_payment
+                
+                schedule.append({
+                    'Payment_Number': payment_num,
+                    'Date': payment_date,
+                    'Payment': monthly_payment,
+                    'Principal': principal_payment,
+                    'Interest': interest_payment,
+                    'Remaining_Balance': max(0, remaining_balance)
+                })
+                
+            elif loan_type == "fixed_bullet":
+                # Solo interessi, capitale alla fine
+                interest_payment = loan_amount * periodic_rate
                 
                 if payment_num < total_payments:
                     # Solo interessi
                     schedule.append({
                         'Payment_Number': payment_num,
                         'Date': payment_date,
-                        'Payment': monthly_interest,
+                        'Payment': interest_payment,
                         'Principal': 0,
-                        'Interest': monthly_interest,
+                        'Interest': interest_payment,
                         'Remaining_Balance': loan_amount
                     })
                 else:
@@ -113,22 +157,13 @@ class LoanPricingCalculator:
                     schedule.append({
                         'Payment_Number': payment_num,
                         'Date': payment_date,
-                        'Payment': monthly_interest + loan_amount,
+                        'Payment': interest_payment + loan_amount,
                         'Principal': loan_amount,
-                        'Interest': monthly_interest,
+                        'Interest': interest_payment,
                         'Remaining_Balance': 0
                     })
         
         return pd.DataFrame(schedule)
-    
-    def calculate_expected_loss(self, loan_amount, pd_1year, lgd_rate, duration_years):
-        """
-        Calcola perdita attesa semplificata
-        """
-        # Modello semplificato: PD cresce nel tempo
-        cumulative_pd = 1 - (1 - pd_1year) ** duration_years
-        expected_loss = loan_amount * cumulative_pd * lgd_rate
-        return expected_loss, cumulative_pd
 
 # Funzioni per gestione progetti
 def save_project(project_data, project_name):
@@ -186,7 +221,7 @@ with tab2:
                     st.write(f"**Cliente/Operazione:** {project.get('project_name', 'N/A')}")
                     st.write(f"**Capitale:** €{project.get('loan_amount', 0):,}")
                     st.write(f"**Durata:** {project.get('duration_years', 0)} anni")
-                    st.write(f"**Rating:** {project.get('rating_class', 'N/A')}")
+                    st.write(f"**PD:** {project.get('pd_1year', 0):.2%}")
                     st.write(f"**Tasso Pareggio:** {project.get('break_even_rate', 0):.2%}")
                     st.write(f"**Tasso Contrattuale:** {project.get('contractual_rate', 0):.2%}")
                 
@@ -204,10 +239,27 @@ with tab2:
 with tab1:
     # Sidebar per parametri di sistema
     st.sidebar.header("⚙️ Parametri di Sistema")
-    equity_cost = st.sidebar.slider("Cost of Equity (%)", 8.0, 15.0, 12.0, 0.1) / 100
-    capital_ratio = st.sidebar.slider("Coefficiente Patrimoniale (%)", 8.0, 20.0, 12.0, 0.1) / 100
-    funding_spread_bp = st.sidebar.slider("Funding Spread (bp)", 50, 300, 150, 10)
-    funding_spread = funding_spread_bp / 10000
+    
+    equity_cost = st.sidebar.number_input(
+        "Cost of Equity (%)", 
+        min_value=5.0, max_value=20.0, 
+        value=12.0, step=0.1,
+        help="Rendimento richiesto sul capitale proprio"
+    ) / 100
+    
+    capital_ratio = st.sidebar.number_input(
+        "Coefficiente Patrimoniale (%)", 
+        min_value=8.0, max_value=25.0, 
+        value=12.0, step=0.1,
+        help="Percentuale di capitale allocato sull'operazione"
+    ) / 100
+    
+    funding_spread = st.sidebar.number_input(
+        "Funding Spread (bp)", 
+        min_value=0, max_value=500, 
+        value=150, step=5,
+        help="Spread di funding della banca in basis points"
+    ) / 10000
 
     # Layout principale a colonne
     col1, col2 = st.columns([1, 1])
@@ -224,75 +276,156 @@ with tab1:
         
         # Struttura dell'operazione
         st.subheader("Struttura dell'Operazione")
+        
         loan_amount = st.number_input(
             "Capitale (€)", 
-            10000, 10000000, 
-            st.session_state.get('loaded_loan_amount', 500000), 
-            10000
-        )
-        duration_years = st.slider(
-            "Durata (anni)", 
-            1, 30, 
-            st.session_state.get('loaded_duration_years', 10)
+            min_value=1000, max_value=100000000, 
+            value=st.session_state.get('loaded_loan_amount', 500000), 
+            step=1000
         )
         
+        # Durata in anni come numero
+        duration_years = st.number_input(
+            "Durata (anni)", 
+            min_value=0.25, max_value=50.0, 
+            value=float(st.session_state.get('loaded_duration_years', 10)), 
+            step=0.25,
+            help="Durata del prestito in anni (es: 2.5 per 2 anni e 6 mesi)"
+        )
+        
+        # Tipo di piano con variabile
         loan_type = st.selectbox("Tipo di Piano", [
             "fixed_amortizing", 
+            "variable_amortizing",
             "fixed_bullet"
-        ], index=0 if st.session_state.get('loaded_loan_type', 'fixed_amortizing') == 'fixed_amortizing' else 1)
+        ], index=0, help="Tipo di piano di rimborso")
+        
+        # Frequenza pagamenti
+        payment_frequency = st.selectbox(
+            "Frequenza Rate", 
+            ["Mensile", "Trimestrale", "Semestrale", "Annuale"],
+            index=0,
+            help="Frequenza di pagamento delle rate"
+        )
+        
+        # Spread variabile (solo se tasso variabile)
+        variable_spread = 0
+        if loan_type == "variable_amortizing":
+            variable_spread = st.number_input(
+                "Spread Tasso Variabile (bp)", 
+                min_value=0, max_value=1000, 
+                value=200, step=5,
+                help="Spread applicato al tasso base per il variabile"
+            ) / 10000
         
         # Rating e rischio
         st.subheader("Rating e Rischio")
-        rating_options = {
-            "AAA": 0.0010,
-            "AA": 0.0025, 
-            "A": 0.0050,
-            "BBB": 0.0100,
-            "BB": 0.0250,
-            "B": 0.0500,
-            "CCC": 0.1000
-        }
         
-        loaded_rating = st.session_state.get('loaded_rating_class', 'BBB')
-        rating_index = list(rating_options.keys()).index(loaded_rating) if loaded_rating in rating_options else 3
-        rating_class = st.selectbox("Rating Class", list(rating_options.keys()), index=rating_index)
-        pd_1year = rating_options[rating_class]
+        # Opzione per inserire PD direttamente
+        use_rating = st.radio("Inserimento Rischio", ["Usa Rating Standard", "Inserisci PD Direttamente"])
         
-        lgd_rate = st.slider(
+        if use_rating == "Usa Rating Standard":
+            rating_options = {
+                "AAA": 0.0010,
+                "AA": 0.0025, 
+                "A": 0.0050,
+                "BBB": 0.0100,
+                "BB": 0.0250,
+                "B": 0.0500,
+                "CCC": 0.1000
+            }
+            
+            loaded_rating = st.session_state.get('loaded_rating_class', 'BBB')
+            rating_index = list(rating_options.keys()).index(loaded_rating) if loaded_rating in rating_options else 3
+            rating_class = st.selectbox("Rating Class", list(rating_options.keys()), index=rating_index)
+            pd_1year = rating_options[rating_class]
+            st.info(f"PD a 1 anno: {pd_1year:.2%}")
+        else:
+            rating_class = "Custom"
+            pd_1year = st.number_input(
+                "Probabilità di Default a 1 anno (%)",
+                min_value=0.01, max_value=50.0,
+                value=st.session_state.get('loaded_pd_1year', 1.0),
+                step=0.01,
+                help="Probabilità di default a 12 mesi in percentuale"
+            ) / 100
+        
+        # LGD come numero
+        lgd_rate = st.number_input(
             "Loss Given Default (%)", 
-            20, 80, 
-            int(st.session_state.get('loaded_lgd_rate', 0.45) * 100)
+            min_value=10.0, max_value=95.0,
+            value=st.session_state.get('loaded_lgd_rate', 45.0),
+            step=1.0,
+            help="Perdita in caso di default in percentuale"
         ) / 100
         
-        # Costi operativi
+        # Costi operativi come percentuale
         st.subheader("Costi Operativi")
-        initial_costs = st.number_input(
-            "Costi Iniziali (€)", 
-            0, 50000, 
-            st.session_state.get('loaded_initial_costs', 2000)
-        )
-        annual_costs = st.number_input(
-            "Costi Annui (€)", 
-            0, 10000, 
-            st.session_state.get('loaded_annual_costs', 500)
-        )
+        operational_costs_pct = st.number_input(
+            "Costi Operativi (% del capitale)", 
+            min_value=0.0, max_value=10.0,
+            value=st.session_state.get('loaded_operational_costs_pct', 0.5),
+            step=0.01,
+            help="Costi operativi totali come percentuale del capitale"
+        ) / 100
         
-        total_operational_costs = initial_costs + (annual_costs * duration_years)
+        # Commissioni
+        st.subheader("Commissioni Attive")
+        
+        # Commissioni iniziali
+        col_comm1, col_comm2 = st.columns(2)
+        with col_comm1:
+            initial_commission_type = st.radio("Commissioni Iniziali", ["Valore Assoluto (€)", "Percentuale (%)"])
+        with col_comm2:
+            if initial_commission_type == "Valore Assoluto (€)":
+                initial_commission = st.number_input(
+                    "Commissioni Iniziali (€)", 
+                    min_value=0.0, max_value=100000.0,
+                    value=st.session_state.get('loaded_initial_commission', 0.0),
+                    step=100.0
+                )
+                initial_commission_pct = initial_commission / loan_amount
+            else:
+                initial_commission_pct = st.number_input(
+                    "Commissioni Iniziali (%)", 
+                    min_value=0.0, max_value=5.0,
+                    value=st.session_state.get('loaded_initial_commission_pct', 0.0),
+                    step=0.01
+                ) / 100
+                initial_commission = initial_commission_pct * loan_amount
+        
+        # Commissioni annue
+        col_comm3, col_comm4 = st.columns(2)
+        with col_comm3:
+            annual_commission_type = st.radio("Commissioni Annue", ["Valore Assoluto (€)", "Percentuale (%)"])
+        with col_comm4:
+            if annual_commission_type == "Valore Assoluto (€)":
+                annual_commission = st.number_input(
+                    "Commissioni Annue (€)", 
+                    min_value=0.0, max_value=50000.0,
+                    value=st.session_state.get('loaded_annual_commission', 0.0),
+                    step=50.0
+                )
+                annual_commission_pct = annual_commission / loan_amount
+            else:
+                annual_commission_pct = st.number_input(
+                    "Commissioni Annue (%)", 
+                    min_value=0.0, max_value=2.0,
+                    value=st.session_state.get('loaded_annual_commission_pct', 0.0),
+                    step=0.01
+                ) / 100
+                annual_commission = annual_commission_pct * loan_amount
+        
+        total_commissions = initial_commission + (annual_commission * duration_years)
 
     with col2:
         st.header("📈 Risultati Calcolo")
         
-        # Calcolo perdita attesa
-        expected_loss, cumulative_pd = calculator.calculate_expected_loss(
-            loan_amount, pd_1year, lgd_rate, duration_years
-        )
-        expected_loss_rate = expected_loss / loan_amount
-        
         # Calcolo tasso di pareggio
         pricing_results = calculator.calculate_break_even_rate(
-            loan_amount, duration_years, rating_class, 
-            total_operational_costs, funding_spread, equity_cost,
-            capital_ratio, expected_loss_rate
+            loan_amount, duration_years, pd_1year, 
+            operational_costs_pct, funding_spread, equity_cost,
+            capital_ratio, lgd_rate
         )
         
         # Visualizzazione risultati
@@ -306,8 +439,12 @@ with tab1:
             st.metric("Tasso di Mercato", f"{pricing_results['market_rate']:.2%}")
             
         with col2b:
-            st.metric("Perdita Attesa", f"€{expected_loss:,.0f}")
-            st.metric("PD Cumulata", f"{cumulative_pd:.2%}")
+            st.metric("Perdita Attesa", f"€{pricing_results['expected_loss']:,.0f}")
+            st.metric("PD Cumulata", f"{pricing_results['cumulative_pd']:.2%}")
+        
+        # Commissioni info
+        if total_commissions > 0:
+            st.info(f"💰 Commissioni Totali: €{total_commissions:,.0f}")
         
         # Breakdown spreads
         spreads_data = {
@@ -340,9 +477,9 @@ with tab1:
         default_contractual = st.session_state.get('loaded_contractual_rate', pricing_results['break_even_rate'] * 100)
         contractual_rate_input = st.number_input(
             "Tasso Contrattuale (%)", 
-            0.0, 20.0, 
-            default_contractual,
-            0.01
+            min_value=0.0, max_value=30.0, 
+            value=default_contractual,
+            step=0.01
         ) / 100
 
     with col3b:
@@ -351,77 +488,91 @@ with tab1:
 
     # Genera piano di ammortamento
     schedule_df = calculator.generate_amortization_schedule(
-        loan_amount, contractual_rate_input, duration_years, 12, loan_type
+        loan_amount, contractual_rate_input, duration_years, 
+        payment_frequency, loan_type, variable_spread
     )
 
     # Calcolo margine commerciale
     total_interest = schedule_df['Interest'].sum()
     break_even_schedule = calculator.generate_amortization_schedule(
-        loan_amount, pricing_results['break_even_rate'], duration_years, 12, loan_type
+        loan_amount, pricing_results['break_even_rate'], duration_years, 
+        payment_frequency, loan_type, variable_spread
     )
     break_even_interest = break_even_schedule['Interest'].sum()
-    commercial_margin = total_interest - break_even_interest
+    commercial_margin = total_interest - break_even_interest + total_commissions
 
     # Visualizzazione margine
     st.subheader("Analisi Economica")
-    col4a, col4b, col4c = st.columns(3)
+    col4a, col4b, col4c, col4d = st.columns(4)
 
     with col4a:
         st.metric("Interessi Totali", f"€{total_interest:,.0f}")
         
     with col4b:
-        st.metric("Interessi Pareggio", f"€{break_even_interest:,.0f}")
+        st.metric("Commissioni", f"€{total_commissions:,.0f}")
         
     with col4c:
+        st.metric("Ricavi Totali", f"€{total_interest + total_commissions:,.0f}")
+        
+    with col4d:
         st.metric("Margine Commerciale", f"€{commercial_margin:,.0f}")
 
     # Salvataggio progetto
     st.subheader("💾 Salva Progetto")
-    col_save, col_export = st.columns(2)
     
-    with col_save:
-        if st.button("💾 Salva Progetto", type="primary"):
-            if project_name:
-                project_data = {
-                    'project_name': project_name,
-                    'created_at': datetime.now().isoformat(),
-                    'loan_amount': loan_amount,
-                    'duration_years': duration_years,
-                    'loan_type': loan_type,
-                    'rating_class': rating_class,
-                    'lgd_rate': lgd_rate,
-                    'initial_costs': initial_costs,
-                    'annual_costs': annual_costs,
-                    'contractual_rate': contractual_rate_input * 100,  # Salva in percentuale
-                    'break_even_rate': pricing_results['break_even_rate'],
-                    'commercial_margin': commercial_margin,
-                    'total_interest': total_interest,
-                    'expected_loss': expected_loss,
-                    'equity_cost': equity_cost,
-                    'capital_ratio': capital_ratio,
-                    'funding_spread': funding_spread
-                }
-                
-                filename = save_project(project_data, project_name)
-                st.success(f"✅ Progetto salvato come: {filename}")
-                
-                # Pulisci session state per loaded values
-                keys_to_clear = [key for key in st.session_state.keys() if key.startswith('loaded_')]
-                for key in keys_to_clear:
-                    del st.session_state[key]
-            else:
-                st.error("⚠️ Inserisci un nome per il progetto!")
+    if st.button("💾 Salva Progetto", type="primary"):
+        if project_name:
+            project_data = {
+                'project_name': project_name,
+                'created_at': datetime.now().isoformat(),
+                'loan_amount': loan_amount,
+                'duration_years': duration_years,
+                'loan_type': loan_type,
+                'payment_frequency': payment_frequency,
+                'rating_class': rating_class,
+                'pd_1year': pd_1year,
+                'lgd_rate': lgd_rate,
+                'operational_costs_pct': operational_costs_pct,
+                'initial_commission': initial_commission,
+                'annual_commission': annual_commission,
+                'contractual_rate': contractual_rate_input * 100,
+                'break_even_rate': pricing_results['break_even_rate'],
+                'commercial_margin': commercial_margin,
+                'total_interest': total_interest,
+                'total_commissions': total_commissions,
+                'expected_loss': pricing_results['expected_loss'],
+                'equity_cost': equity_cost,
+                'capital_ratio': capital_ratio,
+                'funding_spread': funding_spread
+            }
+            
+            filename = save_project(project_data, project_name)
+            st.success(f"✅ Progetto salvato come: {filename}")
+            
+            # Pulisci session state per loaded values
+            keys_to_clear = [key for key in st.session_state.keys() if key.startswith('loaded_')]
+            for key in keys_to_clear:
+                del st.session_state[key]
+        else:
+            st.error("⚠️ Inserisci un nome per il progetto!")
 
-    # Visualizzazione piano ammortamento (prime 12 rate)
-    st.subheader("Piano di Ammortamento (Prime 12 Rate)")
-    display_schedule = schedule_df.head(12).copy()
+    # Piano di ammortamento completo con scroll
+    st.subheader("Piano di Ammortamento Completo")
+    
+    # Prepara dataframe per visualizzazione
+    display_schedule = schedule_df.copy()
     display_schedule['Date'] = display_schedule['Date'].dt.strftime('%Y-%m-%d')
     display_schedule['Payment'] = display_schedule['Payment'].round(2)
     display_schedule['Principal'] = display_schedule['Principal'].round(2)
     display_schedule['Interest'] = display_schedule['Interest'].round(2)
     display_schedule['Remaining_Balance'] = display_schedule['Remaining_Balance'].round(2)
-
-    st.dataframe(display_schedule, use_container_width=True)
+    
+    # Container con altezza fissa e scroll
+    st.dataframe(
+        display_schedule, 
+        use_container_width=True,
+        height=300  # Altezza fissa con scroll automatico
+    )
 
     # Grafico evoluzione saldo
     fig_balance = go.Figure()
