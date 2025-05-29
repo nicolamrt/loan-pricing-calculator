@@ -25,6 +25,23 @@ class LoanPricingCalculator:
     def __init__(self):
         self.risk_free_rate = 0.03  # Tasso risk-free base
         
+    def get_rating_from_pd(self, pd_value):
+        """Converte PD in rating approssimativo"""
+        rating_ranges = [
+            ("AAA", 0.0000, 0.0015),
+            ("AA", 0.0015, 0.0035),
+            ("A", 0.0035, 0.0075),
+            ("BBB", 0.0075, 0.0175),
+            ("BB", 0.0175, 0.0375),
+            ("B", 0.0375, 0.0750),
+            ("CCC", 0.0750, 1.0000)
+        ]
+        
+        for rating, min_pd, max_pd in rating_ranges:
+            if min_pd <= pd_value < max_pd:
+                return rating
+        return "CCC"  # Default per PD molto alta
+        
     def calculate_break_even_rate(self, loan_amount, duration_years, pd_1year, 
                                  operational_costs_pct, funding_spread, equity_cost, 
                                  capital_ratio, lgd_rate):
@@ -63,10 +80,13 @@ class LoanPricingCalculator:
     
     def generate_amortization_schedule(self, loan_amount, annual_rate, duration_years, 
                                      payment_frequency, loan_type="fixed_amortizing", 
-                                     variable_spread=0):
+                                     variable_spread=0, custom_schedule=None):
         """
-        Genera piano di ammortamento con più opzioni
+        Genera piano di ammortamento con più opzioni incluso custom
         """
+        if loan_type == "custom" and custom_schedule is not None:
+            return self.generate_custom_schedule(custom_schedule, annual_rate)
+        
         # Calcolo numero rate e frequenza
         if payment_frequency == "Mensile":
             freq_per_year = 12
@@ -138,9 +158,15 @@ class LoanPricingCalculator:
                     'Remaining_Balance': max(0, remaining_balance)
                 })
                 
-            elif loan_type == "fixed_bullet":
+            elif loan_type in ["fixed_bullet", "variable_bullet"]:
                 # Solo interessi, capitale alla fine
-                interest_payment = loan_amount * periodic_rate
+                if loan_type == "fixed_bullet":
+                    rate_to_use = periodic_rate
+                else:  # variable_bullet
+                    current_rate = self.risk_free_rate + variable_spread
+                    rate_to_use = current_rate / freq_per_year
+                
+                interest_payment = loan_amount * rate_to_use
                 
                 if payment_num < total_payments:
                     # Solo interessi
@@ -162,6 +188,39 @@ class LoanPricingCalculator:
                         'Interest': interest_payment,
                         'Remaining_Balance': 0
                     })
+        
+        return pd.DataFrame(schedule)
+    
+    def generate_custom_schedule(self, custom_schedule, annual_rate):
+        """
+        Genera piano custom basato su date e importi definiti dall'utente
+        """
+        schedule = []
+        
+        for i, row in custom_schedule.iterrows():
+            # Calcolo interessi sul saldo residuo dalla data precedente
+            if i == 0:
+                # Prima rata: interessi dall'inizio
+                days_from_start = (row['Date'] - datetime.now()).days
+                outstanding_amount = row['Saldo_Iniziale'] if 'Saldo_Iniziale' in row else sum(custom_schedule['Capitale'])
+            else:
+                prev_date = custom_schedule.iloc[i-1]['Date']
+                days_from_start = (row['Date'] - prev_date).days
+                outstanding_amount = schedule[i-1]['Remaining_Balance']
+            
+            # Calcolo interessi (pro-rata temporis)
+            interest_payment = outstanding_amount * annual_rate * (days_from_start / 365)
+            principal_payment = row['Capitale']
+            remaining_balance = outstanding_amount - principal_payment
+            
+            schedule.append({
+                'Payment_Number': i + 1,
+                'Date': row['Date'],
+                'Payment': principal_payment + interest_payment,
+                'Principal': principal_payment,
+                'Interest': interest_payment,
+                'Remaining_Balance': max(0, remaining_balance)
+            })
         
         return pd.DataFrame(schedule)
 
@@ -188,14 +247,14 @@ def load_projects():
                     st.error(f"Errore caricamento {filename}: {e}")
     return sorted(projects, key=lambda x: x.get('created_at', ''), reverse=True)
 
-def load_project(filename):
-    """Carica un progetto specifico"""
-    try:
-        with open(f"{PROJECTS_DIR}/{filename}", 'r') as f:
-            return json.load(f)
-    except Exception as e:
-        st.error(f"Errore nel caricamento del progetto: {e}")
-        return None
+def create_custom_schedule_template(loan_amount):
+    """Crea template per piano personalizzato"""
+    template_data = {
+        'Data': ['2025-12-31', '2026-12-31', '2034-12-31'],
+        'Capitale': [3000000, 4000000, 3000000],
+        'Note': ['Primo rimborso', 'Secondo rimborso', 'Rimborso finale']
+    }
+    return pd.DataFrame(template_data)
 
 # Inizializzazione calculator
 calculator = LoanPricingCalculator()
@@ -242,14 +301,14 @@ with tab1:
     
     equity_cost = st.sidebar.number_input(
         "Cost of Equity (%)", 
-        min_value=5.0, max_value=20.0, 
+        min_value=0.0, max_value=100.0, 
         value=12.0, step=0.1,
         help="Rendimento richiesto sul capitale proprio"
     ) / 100
     
     capital_ratio = st.sidebar.number_input(
         "Coefficiente Patrimoniale (%)", 
-        min_value=8.0, max_value=25.0, 
+        min_value=0.0, max_value=100.0, 
         value=12.0, step=0.1,
         help="Percentuale di capitale allocato sull'operazione"
     ) / 100
@@ -280,37 +339,110 @@ with tab1:
         loan_amount = st.number_input(
             "Capitale (€)", 
             min_value=1000, max_value=100000000, 
-            value=st.session_state.get('loaded_loan_amount', 500000), 
+            value=st.session_state.get('loaded_loan_amount', 10000000), 
             step=1000
         )
         
-        # Durata in anni come numero
-        duration_years = st.number_input(
-            "Durata (anni)", 
-            min_value=0.25, max_value=50.0, 
-            value=float(st.session_state.get('loaded_duration_years', 10)), 
-            step=0.25,
-            help="Durata del prestito in anni (es: 2.5 per 2 anni e 6 mesi)"
+        # Scelta tipo di piano
+        plan_type_choice = st.radio(
+            "Tipo di Piano", 
+            ["Piano Standard", "Piano Personalizzato"],
+            help="Piano standard usa formule predefinite, Piano personalizzato permette di definire date e importi custom"
         )
         
-        # Tipo di piano con variabile
-        loan_type = st.selectbox("Tipo di Piano", [
-            "fixed_amortizing", 
-            "variable_amortizing",
-            "fixed_bullet"
-        ], index=0, help="Tipo di piano di rimborso")
+        custom_schedule_df = None
         
-        # Frequenza pagamenti
-        payment_frequency = st.selectbox(
-            "Frequenza Rate", 
-            ["Mensile", "Trimestrale", "Semestrale", "Annuale"],
-            index=0,
-            help="Frequenza di pagamento delle rate"
-        )
+        if plan_type_choice == "Piano Personalizzato":
+            st.subheader("📅 Piano di Ammortamento Personalizzato")
+            
+            # Carica template o usa dati esistenti
+            if 'custom_schedule' not in st.session_state:
+                st.session_state.custom_schedule = create_custom_schedule_template(loan_amount)
+            
+            st.write("**Template di esempio (modificabile):**")
+            st.write("Puoi modificare le date (YYYY-MM-DD) e gli importi direttamente nella tabella:")
+            
+            # Editor della tabella
+            edited_schedule = st.data_editor(
+                st.session_state.custom_schedule,
+                column_config={
+                    "Data": st.column_config.DateColumn(
+                        "Data Rimborso",
+                        help="Data di rimborso (YYYY-MM-DD)",
+                        format="YYYY-MM-DD"
+                    ),
+                    "Capitale": st.column_config.NumberColumn(
+                        "Importo Capitale (€)",
+                        help="Importo capitale da rimborsare",
+                        min_value=0,
+                        max_value=loan_amount,
+                        step=1000,
+                        format="€%.0f"
+                    ),
+                    "Note": st.column_config.TextColumn(
+                        "Note",
+                        help="Note descrittive"
+                    )
+                },
+                num_rows="dynamic",
+                use_container_width=True
+            )
+            
+            # Validazione
+            total_custom_capital = edited_schedule['Capitale'].sum()
+            if abs(total_custom_capital - loan_amount) > 1:
+                st.warning(f"⚠️ Attenzione: Totale capitale nel piano (€{total_custom_capital:,}) diverso dal capitale totale (€{loan_amount:,})")
+            else:
+                st.success(f"✅ Piano bilanciato: €{total_custom_capital:,}")
+            
+            # Converti date da string a datetime
+            try:
+                edited_schedule['Date'] = pd.to_datetime(edited_schedule['Data'])
+                custom_schedule_df = edited_schedule.sort_values('Date')
+                st.session_state.custom_schedule = edited_schedule
+                loan_type = "custom"
+                
+                # Calcola durata approssimativa per altri calcoli
+                duration_years = (custom_schedule_df['Date'].max() - datetime.now()).days / 365.25
+                payment_frequency = "Custom"
+                
+            except Exception as e:
+                st.error(f"Errore nel formato delle date: {e}")
+                custom_schedule_df = None
+                loan_type = "fixed_amortizing"
+                duration_years = 5
+                payment_frequency = "Mensile"
+                
+        else:
+            # Piano standard
+            # Durata in anni come numero
+            duration_years = st.number_input(
+                "Durata (anni)", 
+                min_value=0.25, max_value=50.0, 
+                value=float(st.session_state.get('loaded_duration_years', 10)), 
+                step=0.25,
+                help="Durata del prestito in anni (es: 2.5 per 2 anni e 6 mesi)"
+            )
+            
+            # Tipo di piano con variable bullet
+            loan_type = st.selectbox("Tipo di Piano", [
+                "fixed_amortizing", 
+                "variable_amortizing",
+                "fixed_bullet",
+                "variable_bullet"
+            ], index=0, help="Tipo di piano di rimborso")
+            
+            # Frequenza pagamenti
+            payment_frequency = st.selectbox(
+                "Frequenza Rate", 
+                ["Mensile", "Trimestrale", "Semestrale", "Annuale"],
+                index=0,
+                help="Frequenza di pagamento delle rate"
+            )
         
         # Spread variabile (solo se tasso variabile)
         variable_spread = 0
-        if loan_type == "variable_amortizing":
+        if loan_type in ["variable_amortizing", "variable_bullet"]:
             variable_spread = st.number_input(
                 "Spread Tasso Variabile (bp)", 
                 min_value=0, max_value=1000, 
@@ -322,7 +454,7 @@ with tab1:
         st.subheader("Rating e Rischio")
         
         # Opzione per inserire PD direttamente
-        use_rating = st.radio("Inserimento Rischio", ["Usa Rating Standard", "Inserisci PD Direttamente"])
+        use_rating = st.radio("Inserimento Rischio", ["Usa Rating Standard", "Inserisci PD"])
         
         if use_rating == "Usa Rating Standard":
             rating_options = {
@@ -341,7 +473,6 @@ with tab1:
             pd_1year = rating_options[rating_class]
             st.info(f"PD a 1 anno: {pd_1year:.2%}")
         else:
-            rating_class = "Custom"
             pd_1year = st.number_input(
                 "Probabilità di Default a 1 anno (%)",
                 min_value=0.01, max_value=50.0,
@@ -349,11 +480,16 @@ with tab1:
                 step=0.01,
                 help="Probabilità di default a 12 mesi in percentuale"
             ) / 100
+            
+            # Mostra rating equivalente
+            equivalent_rating = calculator.get_rating_from_pd(pd_1year)
+            st.info(f"Rating equivalente: {equivalent_rating}")
+            rating_class = equivalent_rating
         
-        # LGD come numero
+        # LGD come numero 0-100
         lgd_rate = st.number_input(
             "Loss Given Default (%)", 
-            min_value=10.0, max_value=95.0,
+            min_value=0.0, max_value=100.0,
             value=st.session_state.get('loaded_lgd_rate', 45.0),
             step=1.0,
             help="Perdita in caso di default in percentuale"
@@ -375,19 +511,19 @@ with tab1:
         # Commissioni iniziali
         col_comm1, col_comm2 = st.columns(2)
         with col_comm1:
-            initial_commission_type = st.radio("Commissioni Iniziali", ["Valore Assoluto (€)", "Percentuale (%)"])
+            initial_commission_type = st.radio("Commissioni Iniziali", ["Valore Assoluto (€)", "Percentuale del Capitale (%)"])
         with col_comm2:
             if initial_commission_type == "Valore Assoluto (€)":
                 initial_commission = st.number_input(
                     "Commissioni Iniziali (€)", 
-                    min_value=0.0, max_value=100000.0,
+                    min_value=0.0, max_value=1000000.0,
                     value=st.session_state.get('loaded_initial_commission', 0.0),
                     step=100.0
                 )
                 initial_commission_pct = initial_commission / loan_amount
             else:
                 initial_commission_pct = st.number_input(
-                    "Commissioni Iniziali (%)", 
+                    "Commissioni Iniziali (% del capitale)", 
                     min_value=0.0, max_value=5.0,
                     value=st.session_state.get('loaded_initial_commission_pct', 0.0),
                     step=0.01
@@ -397,19 +533,19 @@ with tab1:
         # Commissioni annue
         col_comm3, col_comm4 = st.columns(2)
         with col_comm3:
-            annual_commission_type = st.radio("Commissioni Annue", ["Valore Assoluto (€)", "Percentuale (%)"])
+            annual_commission_type = st.radio("Commissioni Annue", ["Valore Assoluto (€)", "Percentuale del Capitale (%)"])
         with col_comm4:
             if annual_commission_type == "Valore Assoluto (€)":
                 annual_commission = st.number_input(
                     "Commissioni Annue (€)", 
-                    min_value=0.0, max_value=50000.0,
+                    min_value=0.0, max_value=500000.0,
                     value=st.session_state.get('loaded_annual_commission', 0.0),
                     step=50.0
                 )
                 annual_commission_pct = annual_commission / loan_amount
             else:
                 annual_commission_pct = st.number_input(
-                    "Commissioni Annue (%)", 
+                    "Commissioni Annue (% del capitale)", 
                     min_value=0.0, max_value=2.0,
                     value=st.session_state.get('loaded_annual_commission_pct', 0.0),
                     step=0.01
@@ -487,111 +623,122 @@ with tab1:
         st.metric("Spread Commerciale", f"{commercial_spread:.2%}")
 
     # Genera piano di ammortamento
-    schedule_df = calculator.generate_amortization_schedule(
-        loan_amount, contractual_rate_input, duration_years, 
-        payment_frequency, loan_type, variable_spread
-    )
-
-    # Calcolo margine commerciale
-    total_interest = schedule_df['Interest'].sum()
-    break_even_schedule = calculator.generate_amortization_schedule(
-        loan_amount, pricing_results['break_even_rate'], duration_years, 
-        payment_frequency, loan_type, variable_spread
-    )
-    break_even_interest = break_even_schedule['Interest'].sum()
-    commercial_margin = total_interest - break_even_interest + total_commissions
-
-    # Visualizzazione margine
-    st.subheader("Analisi Economica")
-    col4a, col4b, col4c, col4d = st.columns(4)
-
-    with col4a:
-        st.metric("Interessi Totali", f"€{total_interest:,.0f}")
+    try:
+        schedule_df = calculator.generate_amortization_schedule(
+            loan_amount, contractual_rate_input, duration_years, 
+            payment_frequency, loan_type, variable_spread, custom_schedule_df
+        )
         
-    with col4b:
-        st.metric("Commissioni", f"€{total_commissions:,.0f}")
+        # Calcolo margine commerciale
+        total_interest = schedule_df['Interest'].sum()
+        break_even_schedule = calculator.generate_amortization_schedule(
+            loan_amount, pricing_results['break_even_rate'], duration_years, 
+            payment_frequency, loan_type, variable_spread, custom_schedule_df
+        )
+        break_even_interest = break_even_schedule['Interest'].sum()
+        commercial_margin = total_interest - break_even_interest + total_commissions
+
+        # Visualizzazione margine
+        st.subheader("Analisi Economica")
+        col4a, col4b, col4c, col4d = st.columns(4)
+
+        with col4a:
+            st.metric("Interessi Totali", f"€{total_interest:,.0f}")
+            
+        with col4b:
+            st.metric("Commissioni", f"€{total_commissions:,.0f}")
+            
+        with col4c:
+            st.metric("Ricavi Totali", f"€{total_interest + total_commissions:,.0f}")
+            
+        with col4d:
+            st.metric("Margine Commerciale", f"€{commercial_margin:,.0f}")
+
+        # Piano di ammortamento completo con scroll
+        st.subheader("Piano di Ammortamento Completo")
         
-    with col4c:
-        st.metric("Ricavi Totali", f"€{total_interest + total_commissions:,.0f}")
+        # Prepara dataframe per visualizzazione
+        display_schedule = schedule_df.copy()
+        display_schedule['Date'] = display_schedule['Date'].dt.strftime('%Y-%m-%d')
+        display_schedule['Payment'] = display_schedule['Payment'].round(2)
+        display_schedule['Principal'] = display_schedule['Principal'].round(2)
+        display_schedule['Interest'] = display_schedule['Interest'].round(2)
+        display_schedule['Remaining_Balance'] = display_schedule['Remaining_Balance'].round(2)
         
-    with col4d:
-        st.metric("Margine Commerciale", f"€{commercial_margin:,.0f}")
+        # Container con altezza fissa e scroll
+        st.dataframe(
+            display_schedule, 
+            use_container_width=True,
+            height=300  # Altezza fissa con scroll automatico
+        )
+
+        # Grafico evoluzione saldo
+        fig_balance = go.Figure()
+        fig_balance.add_trace(go.Scatter(
+            x=schedule_df['Payment_Number'],
+            y=schedule_df['Remaining_Balance'],
+            mode='lines',
+            name='Saldo Residuo',
+            line=dict(color='blue', width=2)
+        ))
+
+        fig_balance.update_layout(
+            title="Evoluzione Saldo Residuo",
+            xaxis_title="Numero Rata",
+            yaxis_title="Saldo Residuo (€)",
+            hovermode='x'
+        )
+
+        st.plotly_chart(fig_balance, use_container_width=True)
+
+    except Exception as e:
+        st.error(f"Errore nella generazione del piano di ammortamento: {e}")
+        st.write("Verifica i dati inseriti, in particolare le date nel piano personalizzato.")
 
     # Salvataggio progetto
     st.subheader("💾 Salva Progetto")
     
     if st.button("💾 Salva Progetto", type="primary"):
         if project_name:
-            project_data = {
-                'project_name': project_name,
-                'created_at': datetime.now().isoformat(),
-                'loan_amount': loan_amount,
-                'duration_years': duration_years,
-                'loan_type': loan_type,
-                'payment_frequency': payment_frequency,
-                'rating_class': rating_class,
-                'pd_1year': pd_1year,
-                'lgd_rate': lgd_rate,
-                'operational_costs_pct': operational_costs_pct,
-                'initial_commission': initial_commission,
-                'annual_commission': annual_commission,
-                'contractual_rate': contractual_rate_input * 100,
-                'break_even_rate': pricing_results['break_even_rate'],
-                'commercial_margin': commercial_margin,
-                'total_interest': total_interest,
-                'total_commissions': total_commissions,
-                'expected_loss': pricing_results['expected_loss'],
-                'equity_cost': equity_cost,
-                'capital_ratio': capital_ratio,
-                'funding_spread': funding_spread
-            }
-            
-            filename = save_project(project_data, project_name)
-            st.success(f"✅ Progetto salvato come: {filename}")
-            
-            # Pulisci session state per loaded values
-            keys_to_clear = [key for key in st.session_state.keys() if key.startswith('loaded_')]
-            for key in keys_to_clear:
-                del st.session_state[key]
+            try:
+                project_data = {
+                    'project_name': project_name,
+                    'created_at': datetime.now().isoformat(),
+                    'loan_amount': loan_amount,
+                    'duration_years': duration_years,
+                    'loan_type': loan_type,
+                    'payment_frequency': payment_frequency,
+                    'rating_class': rating_class,
+                    'pd_1year': pd_1year,
+                    'lgd_rate': lgd_rate,
+                    'operational_costs_pct': operational_costs_pct,
+                    'initial_commission': initial_commission,
+                    'annual_commission': annual_commission,
+                    'contractual_rate': contractual_rate_input * 100,
+                    'break_even_rate': pricing_results['break_even_rate'],
+                    'commercial_margin': commercial_margin if 'commercial_margin' in locals() else 0,
+                    'total_interest': total_interest if 'total_interest' in locals() else 0,
+                    'total_commissions': total_commissions,
+                    'expected_loss': pricing_results['expected_loss'],
+                    'equity_cost': equity_cost,
+                    'capital_ratio': capital_ratio,
+                    'funding_spread': funding_spread,
+                    'plan_type': plan_type_choice,
+                    'custom_schedule': custom_schedule_df.to_dict('records') if custom_schedule_df is not None else None
+                }
+                
+                filename = save_project(project_data, project_name)
+                st.success(f"✅ Progetto salvato come: {filename}")
+                
+                # Pulisci session state per loaded values
+                keys_to_clear = [key for key in st.session_state.keys() if key.startswith('loaded_')]
+                for key in keys_to_clear:
+                    del st.session_state[key]
+                    
+            except Exception as e:
+                st.error(f"Errore nel salvataggio: {e}")
         else:
             st.error("⚠️ Inserisci un nome per il progetto!")
-
-    # Piano di ammortamento completo con scroll
-    st.subheader("Piano di Ammortamento Completo")
-    
-    # Prepara dataframe per visualizzazione
-    display_schedule = schedule_df.copy()
-    display_schedule['Date'] = display_schedule['Date'].dt.strftime('%Y-%m-%d')
-    display_schedule['Payment'] = display_schedule['Payment'].round(2)
-    display_schedule['Principal'] = display_schedule['Principal'].round(2)
-    display_schedule['Interest'] = display_schedule['Interest'].round(2)
-    display_schedule['Remaining_Balance'] = display_schedule['Remaining_Balance'].round(2)
-    
-    # Container con altezza fissa e scroll
-    st.dataframe(
-        display_schedule, 
-        use_container_width=True,
-        height=300  # Altezza fissa con scroll automatico
-    )
-
-    # Grafico evoluzione saldo
-    fig_balance = go.Figure()
-    fig_balance.add_trace(go.Scatter(
-        x=schedule_df['Payment_Number'],
-        y=schedule_df['Remaining_Balance'],
-        mode='lines',
-        name='Saldo Residuo',
-        line=dict(color='blue', width=2)
-    ))
-
-    fig_balance.update_layout(
-        title="Evoluzione Saldo Residuo",
-        xaxis_title="Numero Rata",
-        yaxis_title="Saldo Residuo (€)",
-        hovermode='x'
-    )
-
-    st.plotly_chart(fig_balance, use_container_width=True)
 
 # Footer
 st.markdown("---")
