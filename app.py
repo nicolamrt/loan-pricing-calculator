@@ -362,31 +362,73 @@ with tab1:
             st.write("**Template di esempio (modificabile):**")
             st.write("Puoi modificare le date (YYYY-MM-DD) e gli importi direttamente nella tabella:")
             
-            # Editor della tabella
-            edited_schedule = st.data_editor(
-                st.session_state.custom_schedule,
-                column_config={
-                    "Data": st.column_config.DateColumn(
-                        "Data Rimborso",
-                        help="Data di rimborso (YYYY-MM-DD)",
-                        format="YYYY-MM-DD"
-                    ),
-                    "Capitale": st.column_config.NumberColumn(
-                        "Importo Capitale (€)",
-                        help="Importo capitale da rimborsare",
-                        min_value=0,
-                        max_value=loan_amount,
-                        step=1000,
-                        format="€%.0f"
-                    ),
-                    "Note": st.column_config.TextColumn(
-                        "Note",
-                        help="Note descrittive"
+            # Metodo alternativo più semplice per evitare errori
+            st.write("**Inserisci i dati del piano personalizzato:**")
+            
+            # Numero di righe
+            num_rows = st.number_input("Numero di rate/rimborsi", min_value=1, max_value=20, value=3)
+            
+            # Inizializza se non esiste
+            if 'custom_rows' not in st.session_state:
+                st.session_state.custom_rows = []
+                for i in range(3):
+                    default_dates = ['2025-12-31', '2026-12-31', '2034-12-31']
+                    default_amounts = [3000000, 4000000, 3000000]
+                    st.session_state.custom_rows.append({
+                        'date': default_dates[i] if i < len(default_dates) else '2025-12-31',
+                        'amount': default_amounts[i] if i < len(default_amounts) else 1000000,
+                        'note': f'Rimborso {i+1}'
+                    })
+            
+            # Aggiusta il numero di righe
+            while len(st.session_state.custom_rows) < num_rows:
+                st.session_state.custom_rows.append({
+                    'date': '2025-12-31',
+                    'amount': 1000000,
+                    'note': f'Rimborso {len(st.session_state.custom_rows)+1}'
+                })
+            while len(st.session_state.custom_rows) > num_rows:
+                st.session_state.custom_rows.pop()
+            
+            # Input per ogni riga
+            for i in range(num_rows):
+                st.write(f"**Rimborso {i+1}:**")
+                col1, col2, col3 = st.columns([2, 2, 3])
+                
+                with col1:
+                    st.session_state.custom_rows[i]['date'] = st.text_input(
+                        f"Data {i+1}", 
+                        value=st.session_state.custom_rows[i]['date'],
+                        placeholder="YYYY-MM-DD",
+                        key=f"date_{i}"
                     )
-                },
-                num_rows="dynamic",
-                use_container_width=True
-            )
+                
+                with col2:
+                    st.session_state.custom_rows[i]['amount'] = st.number_input(
+                        f"Importo €", 
+                        value=st.session_state.custom_rows[i]['amount'],
+                        min_value=0,
+                        step=1000,
+                        key=f"amount_{i}"
+                    )
+                
+                with col3:
+                    st.session_state.custom_rows[i]['note'] = st.text_input(
+                        f"Note", 
+                        value=st.session_state.custom_rows[i]['note'],
+                        key=f"note_{i}"
+                    )
+            
+            # Crea il DataFrame
+            try:
+                edited_schedule = pd.DataFrame({
+                    'Data': [row['date'] for row in st.session_state.custom_rows],
+                    'Capitale': [row['amount'] for row in st.session_state.custom_rows],
+                    'Note': [row['note'] for row in st.session_state.custom_rows]
+                })
+            except Exception as e:
+                st.error(f"Errore nella creazione del piano: {e}")
+                edited_schedule = create_custom_schedule_template(loan_amount)
             
             # Validazione
             total_custom_capital = edited_schedule['Capitale'].sum()
