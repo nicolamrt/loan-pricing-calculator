@@ -551,48 +551,44 @@ with tab1:
         st.subheader("Commissioni Attive")
         
         # Commissioni iniziali
-        col_comm1, col_comm2 = st.columns(2)
-        with col_comm1:
-            initial_commission_type = st.radio("Commissioni Iniziali", ["Valore Assoluto (€)", "Percentuale del Capitale (%)"])
-        with col_comm2:
-            if initial_commission_type == "Valore Assoluto (€)":
-                initial_commission = st.number_input(
-                    "Commissioni Iniziali (€)", 
-                    min_value=0.0, max_value=1000000.0,
-                    value=st.session_state.get('loaded_initial_commission', 0.0),
-                    step=100.0
-                )
-                initial_commission_pct = initial_commission / loan_amount
-            else:
-                initial_commission_pct = st.number_input(
-                    "Commissioni Iniziali (% del capitale)", 
-                    min_value=0.0, max_value=5.0,
-                    value=st.session_state.get('loaded_initial_commission_pct', 0.0),
-                    step=0.01
-                ) / 100
-                initial_commission = initial_commission_pct * loan_amount
+        initial_commission_type = st.radio("Commissioni Iniziali", ["Valore Assoluto (€)", "Percentuale del Capitale (%)"])
+        
+        if initial_commission_type == "Valore Assoluto (€)":
+            initial_commission = st.number_input(
+                "Commissioni Iniziali (€)", 
+                min_value=0.0, max_value=1000000.0,
+                value=st.session_state.get('loaded_initial_commission', 0.0),
+                step=100.0
+            )
+            initial_commission_pct = initial_commission / loan_amount
+        else:
+            initial_commission_pct = st.number_input(
+                "Commissioni Iniziali (% del capitale)", 
+                min_value=0.0, max_value=5.0,
+                value=st.session_state.get('loaded_initial_commission_pct', 0.0),
+                step=0.01
+            ) / 100
+            initial_commission = initial_commission_pct * loan_amount
         
         # Commissioni annue
-        col_comm3, col_comm4 = st.columns(2)
-        with col_comm3:
-            annual_commission_type = st.radio("Commissioni Annue", ["Valore Assoluto (€)", "Percentuale del Capitale (%)"])
-        with col_comm4:
-            if annual_commission_type == "Valore Assoluto (€)":
-                annual_commission = st.number_input(
-                    "Commissioni Annue (€)", 
-                    min_value=0.0, max_value=500000.0,
-                    value=st.session_state.get('loaded_annual_commission', 0.0),
-                    step=50.0
-                )
-                annual_commission_pct = annual_commission / loan_amount
-            else:
-                annual_commission_pct = st.number_input(
-                    "Commissioni Annue (% del capitale)", 
-                    min_value=0.0, max_value=2.0,
-                    value=st.session_state.get('loaded_annual_commission_pct', 0.0),
-                    step=0.01
-                ) / 100
-                annual_commission = annual_commission_pct * loan_amount
+        annual_commission_type = st.radio("Commissioni Annue", ["Valore Assoluto (€)", "Percentuale del Capitale (%)"])
+        
+        if annual_commission_type == "Valore Assoluto (€)":
+            annual_commission = st.number_input(
+                "Commissioni Annue (€)", 
+                min_value=0.0, max_value=500000.0,
+                value=st.session_state.get('loaded_annual_commission', 0.0),
+                step=50.0
+            )
+            annual_commission_pct = annual_commission / loan_amount
+        else:
+            annual_commission_pct = st.number_input(
+                "Commissioni Annue (% del capitale)", 
+                min_value=0.0, max_value=2.0,
+                value=st.session_state.get('loaded_annual_commission_pct', 0.0),
+                step=0.01
+            ) / 100
+            annual_commission = annual_commission_pct * loan_amount
         
         total_commissions = initial_commission + (annual_commission * duration_years)
 
