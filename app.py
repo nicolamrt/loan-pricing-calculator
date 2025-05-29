@@ -606,15 +606,10 @@ with tab1:
         st.subheader("Breakdown del Tasso di Pareggio")
         
         # Metriche principali
-        col2a, col2b = st.columns(2)
-        
-        with col2a:
-            st.metric("Tasso di Pareggio", f"{pricing_results['break_even_rate']:.2%}")
-            st.metric("Tasso di Mercato", f"{pricing_results['market_rate']:.2%}")
-            
-        with col2b:
-            st.metric("Perdita Attesa", f"€{pricing_results['expected_loss']:,.0f}")
-            st.metric("PD Cumulata", f"{pricing_results['cumulative_pd']:.2%}")
+        st.metric("Tasso di Pareggio", f"{pricing_results['break_even_rate']:.2%}")
+        st.metric("Tasso di Mercato", f"{pricing_results['market_rate']:.2%}")
+        st.metric("Perdita Attesa", f"€{pricing_results['expected_loss']:,.0f}")
+        st.metric("PD Cumulata", f"{pricing_results['cumulative_pd']:.2%}")
         
         # Commissioni info
         if total_commissions > 0:
@@ -645,20 +640,17 @@ with tab1:
 
     # Input per tasso contrattuale
     st.subheader("Tasso Contrattuale")
-    col3a, col3b = st.columns(2)
+    
+    default_contractual = st.session_state.get('loaded_contractual_rate', pricing_results['break_even_rate'] * 100)
+    contractual_rate_input = st.number_input(
+        "Tasso Contrattuale (%)", 
+        min_value=0.0, max_value=30.0, 
+        value=default_contractual,
+        step=0.01
+    ) / 100
 
-    with col3a:
-        default_contractual = st.session_state.get('loaded_contractual_rate', pricing_results['break_even_rate'] * 100)
-        contractual_rate_input = st.number_input(
-            "Tasso Contrattuale (%)", 
-            min_value=0.0, max_value=30.0, 
-            value=default_contractual,
-            step=0.01
-        ) / 100
-
-    with col3b:
-        commercial_spread = contractual_rate_input - pricing_results['break_even_rate']
-        st.metric("Spread Commerciale", f"{commercial_spread:.2%}")
+    commercial_spread = contractual_rate_input - pricing_results['break_even_rate']
+    st.metric("Spread Commerciale", f"{commercial_spread:.2%}")
 
     # Genera piano di ammortamento
     try:
@@ -678,19 +670,11 @@ with tab1:
 
         # Visualizzazione margine
         st.subheader("Analisi Economica")
-        col4a, col4b, col4c, col4d = st.columns(4)
-
-        with col4a:
-            st.metric("Interessi Totali", f"€{total_interest:,.0f}")
-            
-        with col4b:
-            st.metric("Commissioni", f"€{total_commissions:,.0f}")
-            
-        with col4c:
-            st.metric("Ricavi Totali", f"€{total_interest + total_commissions:,.0f}")
-            
-        with col4d:
-            st.metric("Margine Commerciale", f"€{commercial_margin:,.0f}")
+        
+        st.metric("Interessi Totali", f"€{total_interest:,.0f}")
+        st.metric("Commissioni", f"€{total_commissions:,.0f}")
+        st.metric("Ricavi Totali", f"€{total_interest + total_commissions:,.0f}")
+        st.metric("Margine Commerciale", f"€{commercial_margin:,.0f}")
 
         # Piano di ammortamento completo con scroll
         st.subheader("Piano di Ammortamento Completo")
